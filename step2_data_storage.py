@@ -1,9 +1,10 @@
+# Step 2 — put everyone's CSVs into one HDF5 file for the rest of the project
+
 from pathlib import Path
 
 import h5py
 import numpy as np
 import pandas as pd
-
 
 RAW_DATA_DIR = Path("raw_data/raw_data")
 OUTPUT_PATH = Path("data/hoppers_vs_walkers.h5")
@@ -21,101 +22,102 @@ AXIS_COLUMNS = [
 ABS_COLUMN = "Absolute acceleration (m/s^2)"
 
 
-def load_signal(csv_path: Path) -> pd.DataFrame:
+def load_signal(csv_path):
     df = pd.read_csv(csv_path)
 
-    required_columns = [TIME_COLUMN, *AXIS_COLUMNS, ABS_COLUMN]
-    missing_columns = [column for column in required_columns if column not in df.columns]
-    if missing_columns:
-        raise ValueError(f"{csv_path} is missing columns: {missing_columns}")
+    needed_cols = [TIME_COLUMN] + AXIS_COLUMNS + [ABS_COLUMN]
+    missing = []
+    for c in needed_cols:
+        if c not in df.columns:
+            missing.append(c)
+    if len(missing) > 0:
+        raise ValueError(str(csv_path) + " is missing columns: " + str(missing))
 
-    df = df[required_columns].copy()
+    df = df[needed_cols].copy()
     df = df.apply(pd.to_numeric, errors="coerce")
 
     if df.isna().any().any():
-        raise ValueError(f"{csv_path} contains missing or non-numeric values.")
+        raise ValueError(str(csv_path) + " has NaNs or bad numbers.")
 
-    time_values = df[TIME_COLUMN].to_numpy()
-    if len(time_values) < 2:
-        raise ValueError(f"{csv_path} does not contain enough samples.")
+    t = df[TIME_COLUMN].to_numpy()
+    if len(t) < 2:
+        raise ValueError(str(csv_path) + " is too short.")
 
-    time_deltas = np.diff(time_values)
-    if np.any(time_deltas <= 0):
-        raise ValueError(f"{csv_path} has non-increasing timestamps.")
+    dt = np.diff(t)
+    if np.any(dt <= 0):
+        raise ValueError(str(csv_path) + " time column is not strictly increasing.")
 
     return df
 
 
-def create_windows(df: pd.DataFrame, window_seconds: float, target_samples: int) -> tuple[np.ndarray, np.ndarray]:
-    time_values = df[TIME_COLUMN].to_numpy(dtype=np.float64)
-    signal_values = df[AXIS_COLUMNS + [ABS_COLUMN]].to_numpy(dtype=np.float64)
+def create_windows(df, window_seconds, target_samples):
+    t = df[TIME_COLUMN].to_numpy(dtype=np.float64)
+    sig = df[AXIS_COLUMNS + [ABS_COLUMN]].to_numpy(dtype=np.float64)
 
-    start_time = float(time_values[0])
-    end_time = float(time_values[-1])
-    window_starts = np.arange(start_time, end_time - window_seconds, window_seconds)
+    t0 = float(t[0])
+    t1 = float(t[-1])
+    starts = np.arange(t0, t1 - window_seconds, window_seconds)
 
-    if len(window_starts) == 0:
+    if len(starts) == 0:
         return np.empty((0, target_samples, 4)), np.empty((0, target_samples))
 
-    reference_time = np.linspace(0.0, window_seconds, num=target_samples, endpoint=False)
-    signal_windows = []
+    ref_t = np.linspace(0.0, window_seconds, num=target_samples, endpoint=False)
+    out = []
 
-    for window_start in window_starts:
-        window_end = window_start + window_seconds
-        window_mask = (time_values >= window_start) & (time_values < window_end)
-        window_time = time_values[window_mask]
-        window_signal = signal_values[window_mask]
+    for ws in starts:
+        we = ws + window_seconds
+        m = (t >= ws) & (t < we)
+        wt = t[m]
+        wsig = sig[m]
 
-        if len(window_time) < 2:
+        if len(wt) < 2:
             continue
 
-        window_time = window_time - window_time[0]
-        resampled_axes = []
-        for axis_index in range(window_signal.shape[1]):
-            resampled_axis = np.interp(reference_time, window_time, window_signal[:, axis_index])
-            resampled_axes.append(resampled_axis)
+        wt = wt - wt[0]
+        cols = []
+        for j in range(wsig.shape[1]):
+            cols.append(np.interp(ref_t, wt, wsig[:, j]))
+        out.append(np.column_stack(cols))
 
-        signal_windows.append(np.column_stack(resampled_axes))
-
-    if not signal_windows:
+    if len(out) == 0:
         return np.empty((0, target_samples, 4)), np.empty((0, target_samples))
 
-    return np.stack(signal_windows), np.tile(reference_time, (len(signal_windows), 1))
+    stacked = np.stack(out)
+    times_out = np.tile(ref_t, (len(out), 1))
+    return stacked, times_out
 
 
-def write_raw_group(group: h5py.Group, df: pd.DataFrame, csv_path: Path) -> None:
+def write_raw_group(group, df, csv_path):
     group.create_dataset("time", data=df[TIME_COLUMN].to_numpy(dtype=np.float64), compression="gzip")
-    group.create_dataset(
-        "acceleration_xyz",
-        data=df[AXIS_COLUMNS].to_numpy(dtype=np.float64),
-        compression="gzip",
-    )
-    group.create_dataset(
-        "absolute_acceleration",
-        data=df[ABS_COLUMN].to_numpy(dtype=np.float64),
-        compression="gzip",
-    )
+    group.create_dataset("acceleration_xyz", data=df[AXIS_COLUMNS].to_numpy(dtype=np.float64), compression="gzip")
+    group.create_dataset("absolute_acceleration", data=df[ABS_COLUMN].to_numpy(dtype=np.float64), compression="gzip")
 
     group.attrs["source_file"] = str(csv_path.as_posix())
     group.attrs["sample_count"] = len(df)
-    group.attrs["duration_seconds"] = float(df[TIME_COLUMN].iloc[-1] - df[TIME_COLUMN].iloc[0])
+    dur = float(df[TIME_COLUMN].iloc[-1] - df[TIME_COLUMN].iloc[0])
+    group.attrs["duration_seconds"] = dur
 
 
-def write_split_group(split_group: h5py.Group, signals: np.ndarray, times: np.ndarray, labels: np.ndarray) -> None:
+def write_split_group(split_group, signals, times, labels):
     split_group.create_dataset("signals", data=signals, compression="gzip")
     split_group.create_dataset("time", data=times, compression="gzip")
     split_group.create_dataset("labels", data=labels.astype("S16"), compression="gzip")
 
 
-def main() -> None:
-    csv_paths = sorted(RAW_DATA_DIR.glob("*/*.csv"))
-    if not csv_paths:
-        raise FileNotFoundError(f"No CSV files found under {RAW_DATA_DIR}")
+def main():
+    csv_paths = []
+    for p in RAW_DATA_DIR.glob("*/*.csv"):
+        if p.name in ("walking.csv", "jumping.csv"):
+            csv_paths.append(p)
+    csv_paths.sort()
+
+    if len(csv_paths) == 0:
+        raise FileNotFoundError("No CSV files under " + str(RAW_DATA_DIR))
 
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     rng = np.random.default_rng(RANDOM_SEED)
-    split_records: list[dict[str, object]] = []
+    split_records = []
 
     with h5py.File(OUTPUT_PATH, "w") as hdf:
         hdf.attrs["project"] = "HoppersVsWalkers"
@@ -133,57 +135,66 @@ def main() -> None:
         preprocessed_root.create_group("test")
 
         for csv_path in csv_paths:
-            participant = csv_path.parent.name
+            person = csv_path.parent.name
             activity = csv_path.stem
 
             df = load_signal(csv_path)
-            participant_group = raw_root.require_group(participant)
-            activity_group = participant_group.create_group(activity)
-            write_raw_group(activity_group, df, csv_path)
+            pg = raw_root.require_group(person)
+            ag = pg.create_group(activity)
+            write_raw_group(ag, df, csv_path)
 
-            signal_windows, time_windows = create_windows(
-                df,
-                WINDOW_SECONDS,
-                TARGET_SAMPLES_PER_WINDOW,
-            )
+            wins, win_times = create_windows(df, WINDOW_SECONDS, TARGET_SAMPLES_PER_WINDOW)
 
-            for signal_window, time_window in zip(signal_windows, time_windows, strict=False):
+            for i in range(len(wins)):
                 split_records.append(
                     {
-                        "participant": participant,
+                        "participant": person,
                         "activity": activity,
                         "source_file": str(csv_path.as_posix()),
-                        "signals": signal_window,
-                        "time": time_window,
+                        "signals": wins[i],
+                        "time": win_times[i],
                     }
                 )
 
-        if not split_records:
-            raise ValueError("No 5-second windows could be created from the raw CSV files.")
+        if len(split_records) == 0:
+            raise ValueError("Could not build any 5s windows from the CSVs.")
 
         rng.shuffle(split_records)
-        train_count = int(len(split_records) * TRAIN_RATIO)
-        train_records = split_records[:train_count]
-        test_records = split_records[train_count:]
+        n_train = int(len(split_records) * TRAIN_RATIO)
+        train_recs = split_records[:n_train]
+        test_recs = split_records[n_train:]
 
-        for split_name, records in [("train", train_records), ("test", test_records)]:
-            split_group = splits_root.create_group(split_name)
+        for split_name, records in [("train", train_recs), ("test", test_recs)]:
+            sg = splits_root.create_group(split_name)
 
-            signals = np.stack([record["signals"] for record in records])
-            times = np.stack([record["time"] for record in records])
-            labels = np.array([record["activity"] for record in records])
-            participants = np.array([record["participant"] for record in records], dtype="S32")
-            source_files = np.array([record["source_file"] for record in records], dtype="S256")
+            sig_list = []
+            time_list = []
+            lab_list = []
+            part_list = []
+            file_list = []
+            for rec in records:
+                sig_list.append(rec["signals"])
+                time_list.append(rec["time"])
+                lab_list.append(rec["activity"])
+                part_list.append(rec["participant"])
+                file_list.append(rec["source_file"])
 
-            write_split_group(split_group, signals, times, labels)
-            split_group.create_dataset("participants", data=participants, compression="gzip")
-            split_group.create_dataset("source_files", data=source_files, compression="gzip")
-            split_group.attrs["window_count"] = len(records)
+            signals = np.stack(sig_list)
+            times = np.stack(time_list)
+            labels = np.array(lab_list)
+            participants = np.array(part_list, dtype="S32")
+            source_files = np.array(file_list, dtype="S256")
 
-    print(f"Wrote HDF5 file to: {OUTPUT_PATH}")
-    print(f"Total windows: {len(split_records)}")
-    print(f"Training windows: {len(train_records)}")
-    print(f"Testing windows: {len(test_records)}")
+            write_split_group(sg, signals, times, labels)
+            sg.create_dataset("participants", data=participants, compression="gzip")
+            sg.create_dataset("source_files", data=source_files, compression="gzip")
+            sg.attrs["window_count"] = len(records)
+
+    print("Wrote HDF5 file to:", OUTPUT_PATH)
+    print("Total windows:", len(split_records))
+
+    print("Training windows:", len(train_recs))
+    print("Testing windows:", len(test_recs))
 
 
 if __name__ == "__main__":

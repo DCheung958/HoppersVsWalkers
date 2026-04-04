@@ -1,9 +1,10 @@
+# Step 5 — feature extraction
+
 from pathlib import Path
 
 import h5py
 import matplotlib.pyplot as plt
 import numpy as np
-
 
 BASE_DIR = Path(__file__).resolve().parent
 HDF5_PATH = BASE_DIR / "data" / "hoppers_vs_walkers.h5"
@@ -24,96 +25,90 @@ STAT_NAMES = [
 ]
 
 
-def ensure_output_dir() -> None:
+def ensure_output_dir():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def save_figure(fig: plt.Figure, filename: str) -> None:
+def save_figure(fig, filename):
     fig.tight_layout()
     fig.savefig(OUTPUT_DIR / filename, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
 
-def decode(values: np.ndarray) -> list[str]:
-    return [value.decode() if isinstance(value, bytes) else str(value) for value in values]
+def decode(values):
+    out = []
+    for v in values:
+        if isinstance(v, bytes):
+            out.append(v.decode())
+        else:
+            out.append(str(v))
+    return out
 
 
-def reset_group(parent: h5py.Group, name: str) -> h5py.Group:
+def reset_group(parent, name):
     if name in parent:
         del parent[name]
     return parent.create_group(name)
 
 
-def compute_channel_features(channel_values: np.ndarray) -> np.ndarray:
-    mean_value = float(np.mean(channel_values))
-    std_value = float(np.std(channel_values))
-    centered = channel_values - mean_value
+def compute_channel_features(channel_values):
+    mu = float(np.mean(channel_values))
+    sd = float(np.std(channel_values))
+    centered = channel_values - mu
 
-    if std_value == 0.0:
-        skewness = 0.0
-        kurtosis = 0.0
+    if sd == 0.0:
+        sk = 0.0
+        ku = 0.0
     else:
-        standardized = centered / std_value
-        skewness = float(np.mean(standardized**3))
-        kurtosis = float(np.mean(standardized**4))
+        z = centered / sd
+        sk = float(np.mean(z**3))
+        ku = float(np.mean(z**4))
 
     return np.array(
         [
             float(np.max(channel_values)),
             float(np.min(channel_values)),
-            mean_value,
-            std_value,
+            mu,
+            sd,
             float(np.median(channel_values)),
             float(np.max(channel_values) - np.min(channel_values)),
             float(np.var(channel_values)),
             float(np.mean(channel_values**2)),
-            skewness,
-            kurtosis,
+            sk,
+            ku,
         ],
         dtype=np.float64,
     )
 
 
-def extract_feature_matrix(signal_windows: np.ndarray) -> tuple[np.ndarray, list[str]]:
+def extract_feature_matrix(signal_windows):
     feature_rows = []
     feature_names = []
 
-    for channel_name in CHANNEL_NAMES:
-        for stat_name in STAT_NAMES:
-            feature_names.append(f"{channel_name}_{stat_name}")
+    for ch in CHANNEL_NAMES:
+        for st in STAT_NAMES:
+            feature_names.append(ch + "_" + st)
 
-    for window in signal_windows:
-        channel_feature_vectors = []
-        for channel_index in range(window.shape[1]):
-            channel_feature_vectors.append(compute_channel_features(window[:, channel_index]))
-        feature_rows.append(np.concatenate(channel_feature_vectors))
+    for win in signal_windows:
+        vecs = []
+        for c in range(win.shape[1]):
+            vecs.append(compute_channel_features(win[:, c]))
+        feature_rows.append(np.concatenate(vecs))
 
     return np.vstack(feature_rows), feature_names
 
 
-def z_score_normalize(
-    train_features: np.ndarray,
-    test_features: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def z_score_normalize(train_features, test_features):
     train_mean = np.mean(train_features, axis=0)
     train_std = np.std(train_features, axis=0)
     safe_std = np.where(train_std == 0.0, 1.0, train_std)
 
-    normalized_train = (train_features - train_mean) / safe_std
-    normalized_test = (test_features - train_mean) / safe_std
+    nt = (train_features - train_mean) / safe_std
+    nv = (test_features - train_mean) / safe_std
+    return nt, nv, train_mean, safe_std
 
-    return normalized_train, normalized_test, train_mean, safe_std
 
-
-def write_feature_group(
-    group: h5py.Group,
-    feature_matrix: np.ndarray,
-    normalized_feature_matrix: np.ndarray,
-    labels: np.ndarray,
-    participants: np.ndarray,
-    source_files: np.ndarray,
-    feature_names: list[str],
-) -> None:
+def write_feature_group(group, feature_matrix, normalized_feature_matrix, labels, participants, source_files, feature_names):
     group.create_dataset("features", data=feature_matrix, compression="gzip")
     group.create_dataset("normalized_features", data=normalized_feature_matrix, compression="gzip")
     group.create_dataset("labels", data=labels, compression="gzip")
@@ -128,55 +123,52 @@ def write_feature_group(
     group.attrs["window_count"] = int(feature_matrix.shape[0])
 
 
-def store_features() -> dict[str, int]:
+def store_features():
     with h5py.File(HDF5_PATH, "r+") as hdf:
-        features_root = reset_group(hdf["preprocessed"], "features")
+        feat_root = reset_group(hdf["preprocessed"], "features")
 
-        train_group = hdf["preprocessed"]["train"]
-        test_group = hdf["preprocessed"]["test"]
+        tr = hdf["preprocessed"]["train"]
+        te = hdf["preprocessed"]["test"]
 
-        train_signals = train_group["signals"][:]
-        test_signals = test_group["signals"][:]
+        Xtr = tr["signals"][:]
+        Xte = te["signals"][:]
 
-        train_features, feature_names = extract_feature_matrix(train_signals)
-        test_features, _ = extract_feature_matrix(test_signals)
+        train_features, names = extract_feature_matrix(Xtr)
+        test_features, _ = extract_feature_matrix(Xte)
 
-        normalized_train, normalized_test, train_mean, train_std = z_score_normalize(
-            train_features,
-            test_features,
-        )
+        ntr, nte, mu, sig = z_score_normalize(train_features, test_features)
 
-        train_feature_group = features_root.create_group("train")
-        test_feature_group = features_root.create_group("test")
+        g_tr = feat_root.create_group("train")
+        g_te = feat_root.create_group("test")
 
         write_feature_group(
-            train_feature_group,
+            g_tr,
             train_features,
-            normalized_train,
-            train_group["labels"][:],
-            train_group["participants"][:],
-            train_group["source_files"][:],
-            feature_names,
+            ntr,
+            tr["labels"][:],
+            tr["participants"][:],
+            tr["source_files"][:],
+            names,
         )
         write_feature_group(
-            test_feature_group,
+            g_te,
             test_features,
-            normalized_test,
-            test_group["labels"][:],
-            test_group["participants"][:],
-            test_group["source_files"][:],
-            feature_names,
+            nte,
+            te["labels"][:],
+            te["participants"][:],
+            te["source_files"][:],
+            names,
         )
 
-        features_root.create_dataset("normalization_mean", data=train_mean, compression="gzip")
-        features_root.create_dataset("normalization_std", data=train_std, compression="gzip")
-        features_root.create_dataset(
+        feat_root.create_dataset("normalization_mean", data=mu, compression="gzip")
+        feat_root.create_dataset("normalization_std", data=sig, compression="gzip")
+        feat_root.create_dataset(
             "feature_names",
-            data=np.array(feature_names, dtype="S64"),
+            data=np.array(names, dtype="S64"),
             compression="gzip",
         )
-        features_root.attrs["normalization_method"] = "z_score"
-        features_root.attrs["feature_count"] = int(len(feature_names))
+        feat_root.attrs["normalization_method"] = "z_score"
+        feat_root.attrs["feature_count"] = int(len(names))
 
     return {
         "train_windows": int(train_features.shape[0]),
@@ -185,13 +177,13 @@ def store_features() -> dict[str, int]:
     }
 
 
-def plot_feature_mean_comparison() -> None:
+def plot_feature_mean_comparison():
     with h5py.File(HDF5_PATH, "r") as hdf:
-        feature_names = decode(hdf["preprocessed"]["features"]["feature_names"][:])
-        train_features = hdf["preprocessed"]["features"]["train"]["features"][:]
-        train_labels = decode(hdf["preprocessed"]["features"]["train"]["labels"][:])
+        fnames = decode(hdf["preprocessed"]["features"]["feature_names"][:])
+        X = hdf["preprocessed"]["features"]["train"]["features"][:]
+        y = decode(hdf["preprocessed"]["features"]["train"]["labels"][:])
 
-    selected_feature_names = [
+    pick = [
         "abs_mean",
         "abs_std",
         "abs_max",
@@ -199,89 +191,79 @@ def plot_feature_mean_comparison() -> None:
         "z_std",
         "z_energy",
     ]
-    selected_indices = [feature_names.index(name) for name in selected_feature_names]
+    idxs = []
+    for name in pick:
+        idxs.append(fnames.index(name))
 
-    walking_mask = np.array([label == "walking" for label in train_labels])
-    jumping_mask = np.array([label == "jumping" for label in train_labels])
+    walk_mask = np.array([lab == "walking" for lab in y])
+    jump_mask = np.array([lab == "jumping" for lab in y])
 
-    walking_means = np.mean(train_features[walking_mask][:, selected_indices], axis=0)
-    jumping_means = np.mean(train_features[jumping_mask][:, selected_indices], axis=0)
+    m_walk = np.mean(X[walk_mask][:, idxs], axis=0)
+    m_jump = np.mean(X[jump_mask][:, idxs], axis=0)
 
-    x_positions = np.arange(len(selected_feature_names))
-    width = 0.35
+    xpos = np.arange(len(pick))
+    w = 0.35
 
     fig, ax = plt.subplots(figsize=(12, 5))
-    ax.bar(x_positions - width / 2, walking_means, width, color="tab:blue", label="walking")
-    ax.bar(x_positions + width / 2, jumping_means, width, color="tab:orange", label="jumping")
-    ax.set_title("Average feature values for selected training features")
+    ax.bar(xpos - w / 2, m_walk, w, color="tab:blue", label="walking")
+    ax.bar(xpos + w / 2, m_jump, w, color="tab:orange", label="jumping")
+    ax.set_title("Average feature values for a few training features")
     ax.set_ylabel("Feature value")
-    ax.set_xticks(x_positions)
-    ax.set_xticklabels(selected_feature_names, rotation=20)
+    ax.set_xticks(xpos)
+    ax.set_xticklabels(pick, rotation=20)
     ax.grid(True, axis="y", alpha=0.3)
     ax.legend()
 
     save_figure(fig, "selected_feature_means.png")
 
 
-def plot_normalization_effect() -> None:
+def plot_normalization_effect():
     with h5py.File(HDF5_PATH, "r") as hdf:
-        feature_names = decode(hdf["preprocessed"]["features"]["feature_names"][:])
-        raw_features = hdf["preprocessed"]["features"]["train"]["features"][:]
-        normalized_features = hdf["preprocessed"]["features"]["train"]["normalized_features"][:]
+        fnames = decode(hdf["preprocessed"]["features"]["feature_names"][:])
+        raw = hdf["preprocessed"]["features"]["train"]["features"][:]
+        norm = hdf["preprocessed"]["features"]["train"]["normalized_features"][:]
 
-    selected_feature_names = ["abs_mean", "abs_std", "abs_range", "z_energy"]
-    selected_indices = [feature_names.index(name) for name in selected_feature_names]
+    pick = ["abs_mean", "abs_std", "abs_range", "z_energy"]
+    idxs = [fnames.index(n) for n in pick]
 
-    raw_means = np.mean(raw_features[:, selected_indices], axis=0)
-    raw_stds = np.std(raw_features[:, selected_indices], axis=0)
-    normalized_means = np.mean(normalized_features[:, selected_indices], axis=0)
-    normalized_stds = np.std(normalized_features[:, selected_indices], axis=0)
+    rm = np.mean(raw[:, idxs], axis=0)
+    rs = np.std(raw[:, idxs], axis=0)
+    nm = np.mean(norm[:, idxs], axis=0)
+    ns = np.std(norm[:, idxs], axis=0)
 
-    x_positions = np.arange(len(selected_feature_names))
-    width = 0.35
+    xpos = np.arange(len(pick))
+    w = 0.35
 
     fig, axes = plt.subplots(2, 1, figsize=(11, 7), sharex=True)
-    axes[0].bar(x_positions - width / 2, raw_means, width, color="tab:gray", label="raw feature mean")
-    axes[0].bar(
-        x_positions + width / 2,
-        normalized_means,
-        width,
-        color="tab:green",
-        label="normalized feature mean",
-    )
-    axes[0].set_title("Effect of z-score normalization on selected features")
+    axes[0].bar(xpos - w / 2, rm, w, color="tab:gray", label="raw feature mean")
+    axes[0].bar(xpos + w / 2, nm, w, color="tab:green", label="normalized feature mean")
+    axes[0].set_title("What z-score normalization does (selected features)")
     axes[0].set_ylabel("Mean across training windows")
     axes[0].grid(True, axis="y", alpha=0.3)
     axes[0].legend()
 
-    axes[1].bar(x_positions - width / 2, raw_stds, width, color="tab:gray", label="raw feature std")
-    axes[1].bar(
-        x_positions + width / 2,
-        normalized_stds,
-        width,
-        color="tab:green",
-        label="normalized feature std",
-    )
+    axes[1].bar(xpos - w / 2, rs, w, color="tab:gray", label="raw feature std")
+    axes[1].bar(xpos + w / 2, ns, w, color="tab:green", label="normalized feature std")
     axes[1].set_ylabel("Standard deviation")
-    axes[1].set_xticks(x_positions)
-    axes[1].set_xticklabels(selected_feature_names, rotation=20)
+    axes[1].set_xticks(xpos)
+    axes[1].set_xticklabels(pick, rotation=20)
     axes[1].grid(True, axis="y", alpha=0.3)
     axes[1].legend()
 
     save_figure(fig, "normalization_effect.png")
 
 
-def main() -> None:
+def main():
     ensure_output_dir()
-    summary = store_features()
+    s = store_features()
     plot_feature_mean_comparison()
     plot_normalization_effect()
 
-    print(f"Updated feature data in: {HDF5_PATH}")
-    print(f"Saved step 5 figures to: {OUTPUT_DIR}")
-    print(f"Training windows processed: {summary['train_windows']}")
-    print(f"Testing windows processed: {summary['test_windows']}")
-    print(f"Features per window: {summary['feature_count']}")
+    print("Updated feature data in:", HDF5_PATH)
+    print("Saved step 5 figures to:", OUTPUT_DIR)
+    print("Training windows processed:", s["train_windows"])
+    print("Testing windows processed:", s["test_windows"])
+    print("Features per window:", s["feature_count"])
 
 
 if __name__ == "__main__":

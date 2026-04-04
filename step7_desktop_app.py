@@ -1,3 +1,5 @@
+# Step 7 — little GUI to run the model on a new CSV (course demo)
+
 from pathlib import Path
 import csv
 import pickle
@@ -9,7 +11,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-
 
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "models" / "logistic_regression_model.pkl"
@@ -39,240 +40,241 @@ STAT_NAMES = [
 ]
 
 
-def load_model_bundle() -> dict:
-    with MODEL_PATH.open("rb") as file:
-        return pickle.load(file)
+def load_model_bundle():
+    with MODEL_PATH.open("rb") as f:
+        return pickle.load(f)
 
 
-def sigmoid(values: np.ndarray) -> np.ndarray:
+def sigmoid(values):
     clipped = np.clip(values, -500.0, 500.0)
     return 1.0 / (1.0 + np.exp(-clipped))
 
 
-def load_signal(csv_path: Path) -> pd.DataFrame:
+def load_signal(csv_path):
     df = pd.read_csv(csv_path)
-    required_columns = [TIME_COLUMN, *AXIS_COLUMNS, ABS_COLUMN]
-    missing_columns = [column for column in required_columns if column not in df.columns]
-    if missing_columns:
-        raise ValueError(f"Missing columns: {missing_columns}")
+    need = [TIME_COLUMN] + AXIS_COLUMNS + [ABS_COLUMN]
+    missing = [c for c in need if c not in df.columns]
+    if missing:
+        raise ValueError("Missing columns: " + str(missing))
 
-    df = df[required_columns].copy()
+    df = df[need].copy()
     df = df.apply(pd.to_numeric, errors="coerce")
     if df.isna().any().any():
         raise ValueError("Input CSV contains missing or non-numeric values.")
 
-    time_values = df[TIME_COLUMN].to_numpy()
-    if len(time_values) < 2:
+    t = df[TIME_COLUMN].to_numpy()
+    if len(t) < 2:
         raise ValueError("Input CSV does not contain enough samples.")
-    if np.any(np.diff(time_values) <= 0):
+    if np.any(np.diff(t) <= 0):
         raise ValueError("Input CSV timestamps must be strictly increasing.")
 
     return df
 
 
-def create_windows(df: pd.DataFrame, window_seconds: float, target_samples: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    time_values = df[TIME_COLUMN].to_numpy(dtype=np.float64)
-    signal_values = df[AXIS_COLUMNS + [ABS_COLUMN]].to_numpy(dtype=np.float64)
+def create_windows(df, window_seconds, target_samples):
+    t = df[TIME_COLUMN].to_numpy(dtype=np.float64)
+    sig = df[AXIS_COLUMNS + [ABS_COLUMN]].to_numpy(dtype=np.float64)
 
-    start_time = float(time_values[0])
-    end_time = float(time_values[-1])
-    window_starts = np.arange(start_time, end_time - window_seconds, window_seconds)
-    if len(window_starts) == 0:
+    t0 = float(t[0])
+    t1 = float(t[-1])
+    starts = np.arange(t0, t1 - window_seconds, window_seconds)
+    if len(starts) == 0:
         return (
             np.empty((0, target_samples, 4), dtype=np.float64),
             np.empty((0, target_samples), dtype=np.float64),
             np.empty((0,), dtype=np.float64),
         )
 
-    reference_time = np.linspace(0.0, window_seconds, num=target_samples, endpoint=False)
-    signal_windows = []
-    time_windows = []
-    valid_window_starts = []
+    ref_t = np.linspace(0.0, window_seconds, num=target_samples, endpoint=False)
+    wins = []
+    tw = []
+    valid_starts = []
 
-    for window_start in window_starts:
-        window_end = window_start + window_seconds
-        mask = (time_values >= window_start) & (time_values < window_end)
-        window_time = time_values[mask]
-        window_signal = signal_values[mask]
+    for ws in starts:
+        we = ws + window_seconds
+        m = (t >= ws) & (t < we)
+        wt = t[m]
+        wsig = sig[m]
 
-        if len(window_time) < 2:
+        if len(wt) < 2:
             continue
 
-        window_time = window_time - window_time[0]
-        resampled_axes = []
-        for axis_index in range(window_signal.shape[1]):
-            resampled_axis = np.interp(reference_time, window_time, window_signal[:, axis_index])
-            resampled_axes.append(resampled_axis)
+        wt = wt - wt[0]
+        cols = []
+        for j in range(wsig.shape[1]):
+            cols.append(np.interp(ref_t, wt, wsig[:, j]))
 
-        signal_windows.append(np.column_stack(resampled_axes))
-        time_windows.append(reference_time.copy())
-        valid_window_starts.append(window_start)
+        wins.append(np.column_stack(cols))
+        tw.append(ref_t.copy())
+        valid_starts.append(ws)
 
-    if not signal_windows:
+    if len(wins) == 0:
         return (
             np.empty((0, target_samples, 4), dtype=np.float64),
             np.empty((0, target_samples), dtype=np.float64),
             np.empty((0,), dtype=np.float64),
         )
 
-    return np.stack(signal_windows), np.stack(time_windows), np.array(valid_window_starts, dtype=np.float64)
+    return np.stack(wins), np.stack(tw), np.array(valid_starts, dtype=np.float64)
 
 
-def fill_missing_1d(values: np.ndarray) -> np.ndarray:
+def fill_missing_1d(values):
     filled = values.astype(np.float64, copy=True)
     nan_mask = np.isnan(filled)
     if not np.any(nan_mask):
         return filled
 
-    valid_indices = np.where(~nan_mask)[0]
-    if len(valid_indices) == 0:
+    ok = np.where(~nan_mask)[0]
+    if len(ok) == 0:
         return np.zeros_like(filled)
 
-    first_valid = valid_indices[0]
-    filled[:first_valid] = filled[first_valid]
+    first = ok[0]
+    filled[:first] = filled[first]
 
-    for index in range(first_valid + 1, len(filled)):
-        if np.isnan(filled[index]):
-            filled[index] = filled[index - 1]
+    for i in range(first + 1, len(filled)):
+        if np.isnan(filled[i]):
+            filled[i] = filled[i - 1]
 
     return filled
 
 
-def moving_average(values: np.ndarray, window_size: int) -> np.ndarray:
-    filtered = np.zeros_like(values, dtype=np.float64)
-    for index in range(len(values)):
-        start_index = max(0, index - window_size + 1)
-        filtered[index] = np.mean(values[start_index : index + 1])
-    return filtered
+def moving_average(values, window_size):
+    out = np.zeros_like(values, dtype=np.float64)
+    for i in range(len(values)):
+        s = max(0, i - window_size + 1)
+        out[i] = np.mean(values[s : i + 1])
+    return out
 
 
-def preprocess_signal_matrix(signal_matrix: np.ndarray, window_size: int) -> np.ndarray:
-    preprocessed = np.zeros_like(signal_matrix, dtype=np.float64)
-    for column_index in range(signal_matrix.shape[1]):
-        filled_column = fill_missing_1d(signal_matrix[:, column_index])
-        preprocessed[:, column_index] = moving_average(filled_column, window_size)
-    return preprocessed
+def preprocess_signal_matrix(signal_matrix, window_size):
+    out = np.zeros_like(signal_matrix, dtype=np.float64)
+    for c in range(signal_matrix.shape[1]):
+        col = fill_missing_1d(signal_matrix[:, c])
+        out[:, c] = moving_average(col, window_size)
+    return out
 
 
-def compute_channel_features(channel_values: np.ndarray) -> np.ndarray:
-    mean_value = float(np.mean(channel_values))
-    std_value = float(np.std(channel_values))
-    centered = channel_values - mean_value
+def compute_channel_features(channel_values):
+    mu = float(np.mean(channel_values))
+    sd = float(np.std(channel_values))
+    centered = channel_values - mu
 
-    if std_value == 0.0:
-        skewness = 0.0
-        kurtosis = 0.0
+    if sd == 0.0:
+        sk = 0.0
+        ku = 0.0
     else:
-        standardized = centered / std_value
-        skewness = float(np.mean(standardized**3))
-        kurtosis = float(np.mean(standardized**4))
+        z = centered / sd
+        sk = float(np.mean(z**3))
+        ku = float(np.mean(z**4))
 
     return np.array(
         [
             float(np.max(channel_values)),
             float(np.min(channel_values)),
-            mean_value,
-            std_value,
+            mu,
+            sd,
             float(np.median(channel_values)),
             float(np.max(channel_values) - np.min(channel_values)),
             float(np.var(channel_values)),
             float(np.mean(channel_values**2)),
-            skewness,
-            kurtosis,
+            sk,
+            ku,
         ],
         dtype=np.float64,
     )
 
 
-def extract_feature_matrix(signal_windows: np.ndarray) -> np.ndarray:
-    feature_rows = []
-    for window in signal_windows:
-        channel_feature_vectors = []
-        for channel_index in range(window.shape[1]):
-            channel_feature_vectors.append(compute_channel_features(window[:, channel_index]))
-        feature_rows.append(np.concatenate(channel_feature_vectors))
-    return np.vstack(feature_rows)
+def extract_feature_matrix(signal_windows):
+    rows = []
+    for win in signal_windows:
+        bits = []
+        for c in range(win.shape[1]):
+            bits.append(compute_channel_features(win[:, c]))
+        rows.append(np.concatenate(bits))
+    return np.vstack(rows)
 
 
-def normalize_features(feature_matrix: np.ndarray, normalization_mean: np.ndarray, normalization_std: np.ndarray) -> np.ndarray:
+def normalize_features(feature_matrix, normalization_mean, normalization_std):
     return (feature_matrix - normalization_mean) / normalization_std
 
 
-def predict_probabilities(normalized_features: np.ndarray, model_bundle: dict) -> np.ndarray:
-    linear_output = normalized_features @ model_bundle["coefficients"] + model_bundle["intercept"]
-    return sigmoid(linear_output)
+def predict_probabilities(normalized_features, model_bundle):
+    z = normalized_features @ model_bundle["coefficients"] + model_bundle["intercept"]
+    return sigmoid(z)
 
 
-def classify_file(csv_path: Path, model_bundle: dict) -> dict[str, object]:
+def classify_file(csv_path, model_bundle):
     df = load_signal(csv_path)
     signal_windows, time_windows, window_starts = create_windows(df, WINDOW_SECONDS, TARGET_SAMPLES_PER_WINDOW)
     if len(signal_windows) == 0:
         raise ValueError("The input file is too short to form any 5-second windows.")
 
-    preprocessed_windows = np.zeros_like(signal_windows, dtype=np.float64)
-    for window_index in range(signal_windows.shape[0]):
-        preprocessed_windows[window_index] = preprocess_signal_matrix(signal_windows[window_index], MOVING_AVERAGE_WINDOW)
+    proc = np.zeros_like(signal_windows, dtype=np.float64)
+    for i in range(signal_windows.shape[0]):
+        proc[i] = preprocess_signal_matrix(signal_windows[i], MOVING_AVERAGE_WINDOW)
 
-    feature_matrix = extract_feature_matrix(preprocessed_windows)
-    normalized_features = normalize_features(
-        feature_matrix,
+    feats = extract_feature_matrix(proc)
+    normed = normalize_features(
+        feats,
         model_bundle["normalization_mean"],
         model_bundle["normalization_std"],
     )
 
-    probabilities = predict_probabilities(normalized_features, model_bundle)
-    predicted_binary = (probabilities >= model_bundle["classification_threshold"]).astype(int)
-    predicted_labels = [
-        model_bundle["positive_label"] if value == 1 else model_bundle["negative_label"]
-        for value in predicted_binary
-    ]
+    probs = predict_probabilities(normed, model_bundle)
+    thr = model_bundle["classification_threshold"]
+    pred_bin = (probs >= thr).astype(int)
+    pred_labels = []
+    for v in pred_bin:
+        if v == 1:
+            pred_labels.append(model_bundle["positive_label"])
+        else:
+            pred_labels.append(model_bundle["negative_label"])
 
     return {
         "time_windows": time_windows,
         "window_starts": window_starts,
-        "predicted_labels": predicted_labels,
-        "probabilities": probabilities,
+        "predicted_labels": pred_labels,
+        "probabilities": probs,
     }
 
 
-def write_predictions_csv(output_path: Path, predictions: dict[str, object]) -> None:
-    with output_path.open("w", newline="", encoding="utf-8") as file:
-        writer = csv.writer(file)
-        writer.writerow(["window_index", "window_start_s", "window_end_s", "predicted_label", "jumping_probability"])
+def write_predictions_csv(output_path, predictions):
+    with output_path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["window_index", "window_start_s", "window_end_s", "predicted_label", "jumping_probability"])
 
-        for index, (window_start, label, probability) in enumerate(
+        for idx, (ws, lab, p) in enumerate(
             zip(
                 predictions["window_starts"],
                 predictions["predicted_labels"],
                 predictions["probabilities"],
-                strict=False,
             )
         ):
-            writer.writerow(
+            w.writerow(
                 [
-                    index,
-                    f"{window_start:.4f}",
-                    f"{window_start + WINDOW_SECONDS:.4f}",
-                    label,
-                    f"{probability:.6f}",
+                    idx,
+                    "%.4f" % ws,
+                    "%.4f" % (ws + WINDOW_SECONDS),
+                    lab,
+                    "%.6f" % p,
                 ]
             )
 
 
-def save_prediction_plot(plot_path: Path, predictions: dict[str, object]) -> None:
+def save_prediction_plot(plot_path, predictions):
     starts = predictions["window_starts"]
-    probabilities = predictions["probabilities"]
+    probs = predictions["probabilities"]
     labels = predictions["predicted_labels"]
-    encoded_labels = np.array([1 if label == "jumping" else 0 for label in labels], dtype=np.int64)
+    enc = np.array([1 if lab == "jumping" else 0 for lab in labels], dtype=np.int64)
 
     fig, axes = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
-    axes[0].plot(starts, probabilities, marker="o", color="tab:red", linewidth=1.8)
+    axes[0].plot(starts, probs, marker="o", color="tab:red", linewidth=1.8)
     axes[0].axhline(0.5, linestyle="--", color="tab:gray", linewidth=1.0)
     axes[0].set_ylabel("Jumping probability")
     axes[0].set_title("Predicted probability per 5-second window")
     axes[0].grid(True, alpha=0.3)
 
-    axes[1].step(starts, encoded_labels, where="post", color="tab:blue", linewidth=1.8)
+    axes[1].step(starts, enc, where="post", color="tab:blue", linewidth=1.8)
     axes[1].set_yticks([0, 1])
     axes[1].set_yticklabels(["walking", "jumping"])
     axes[1].set_xlabel("Window start time (s)")
@@ -285,39 +287,39 @@ def save_prediction_plot(plot_path: Path, predictions: dict[str, object]) -> Non
 
 
 class ActivityClassifierApp:
-    def __init__(self, root: tk.Tk) -> None:
+    def __init__(self, root):
         self.root = root
         self.root.title("HoppersVsWalkers Classifier")
         self.root.geometry("980x760")
 
         self.model_bundle = load_model_bundle()
-        self.input_path: Path | None = None
-        self.last_predictions: dict[str, object] | None = None
+        self.input_path = None
+        self.last_predictions = None
 
         self.status_var = tk.StringVar(value="Select a CSV file to begin.")
         self.input_var = tk.StringVar(value="No file selected")
 
         self._build_ui()
 
-    def _build_ui(self) -> None:
-        control_frame = ttk.Frame(self.root, padding=12)
-        control_frame.pack(fill="x")
+    def _build_ui(self):
+        ctrl = ttk.Frame(self.root, padding=12)
+        ctrl.pack(fill="x")
 
-        ttk.Label(control_frame, text="Input CSV:").grid(row=0, column=0, sticky="w")
-        ttk.Entry(control_frame, textvariable=self.input_var, width=90).grid(row=0, column=1, padx=8, sticky="ew")
-        ttk.Button(control_frame, text="Browse", command=self.select_file).grid(row=0, column=2, padx=4)
-        ttk.Button(control_frame, text="Classify", command=self.run_classification).grid(row=0, column=3, padx=4)
-        ttk.Button(control_frame, text="Save Output CSV", command=self.save_output_csv).grid(row=0, column=4, padx=4)
-        ttk.Button(control_frame, text="Save Plot", command=self.save_plot).grid(row=0, column=5, padx=4)
-        control_frame.columnconfigure(1, weight=1)
+        ttk.Label(ctrl, text="Input CSV:").grid(row=0, column=0, sticky="w")
+        ttk.Entry(ctrl, textvariable=self.input_var, width=90).grid(row=0, column=1, padx=8, sticky="ew")
+        ttk.Button(ctrl, text="Browse", command=self.select_file).grid(row=0, column=2, padx=4)
+        ttk.Button(ctrl, text="Classify", command=self.run_classification).grid(row=0, column=3, padx=4)
+        ttk.Button(ctrl, text="Save Output CSV", command=self.save_output_csv).grid(row=0, column=4, padx=4)
+        ttk.Button(ctrl, text="Save Plot", command=self.save_plot).grid(row=0, column=5, padx=4)
+        ctrl.columnconfigure(1, weight=1)
 
         ttk.Label(self.root, textvariable=self.status_var, padding=(12, 0, 12, 8)).pack(fill="x")
 
-        results_frame = ttk.Frame(self.root, padding=(12, 0, 12, 12))
-        results_frame.pack(fill="both", expand=True)
+        results = ttk.Frame(self.root, padding=(12, 0, 12, 12))
+        results.pack(fill="both", expand=True)
 
         self.tree = ttk.Treeview(
-            results_frame,
+            results,
             columns=("start", "end", "label", "probability"),
             show="headings",
             height=8,
@@ -326,16 +328,16 @@ class ActivityClassifierApp:
         self.tree.heading("end", text="Window End (s)")
         self.tree.heading("label", text="Predicted Label")
         self.tree.heading("probability", text="Jumping Probability")
-        for column, width in [("start", 130), ("end", 130), ("label", 160), ("probability", 160)]:
-            self.tree.column(column, width=width, anchor="center")
+        for col, width in [("start", 130), ("end", 130), ("label", 160), ("probability", 160)]:
+            self.tree.column(col, width=width, anchor="center")
         self.tree.pack(fill="x", pady=(0, 12))
 
         self.figure, self.axes = plt.subplots(2, 1, figsize=(8.5, 5.5), sharex=True)
-        self.canvas = FigureCanvasTkAgg(self.figure, master=results_frame)
+        self.canvas = FigureCanvasTkAgg(self.figure, master=results)
         self.canvas.get_tk_widget().pack(fill="both", expand=True)
         self._clear_plot()
 
-    def _clear_plot(self) -> None:
+    def _clear_plot(self):
         for ax in self.axes:
             ax.clear()
             ax.grid(True, alpha=0.3)
@@ -347,7 +349,7 @@ class ActivityClassifierApp:
         self.axes[1].set_yticklabels(["walking", "jumping"])
         self.canvas.draw()
 
-    def select_file(self) -> None:
+    def select_file(self):
         selected = filedialog.askopenfilename(
             title="Select accelerometer CSV file",
             filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
@@ -357,109 +359,109 @@ class ActivityClassifierApp:
             self.input_var.set(str(self.input_path))
             self.status_var.set("File selected. Click Classify to run the model.")
 
-    def run_classification(self) -> None:
+    def run_classification(self):
         if self.input_path is None:
             messagebox.showerror("No file selected", "Please choose a CSV file first.")
             return
 
         try:
             predictions = classify_file(self.input_path, self.model_bundle)
-        except Exception as error:
-            messagebox.showerror("Classification failed", str(error))
+        except Exception as e:
+            messagebox.showerror("Classification failed", str(e))
             return
 
         self.last_predictions = predictions
         self._populate_table(predictions)
         self._update_plot(predictions)
-        self.status_var.set(f"Classification complete. Generated {len(predictions['predicted_labels'])} windows.")
+        n = len(predictions["predicted_labels"])
+        self.status_var.set("Classification complete. Generated " + str(n) + " windows.")
 
-    def _populate_table(self, predictions: dict[str, object]) -> None:
+    def _populate_table(self, predictions):
         for item in self.tree.get_children():
             self.tree.delete(item)
 
-        for window_start, label, probability in zip(
+        for ws, lab, p in zip(
             predictions["window_starts"],
             predictions["predicted_labels"],
             predictions["probabilities"],
-            strict=False,
         ):
             self.tree.insert(
                 "",
                 "end",
                 values=(
-                    f"{window_start:.4f}",
-                    f"{window_start + WINDOW_SECONDS:.4f}",
-                    label,
-                    f"{probability:.4f}",
+                    "%.4f" % ws,
+                    "%.4f" % (ws + WINDOW_SECONDS),
+                    lab,
+                    "%.4f" % p,
                 ),
             )
 
-    def _update_plot(self, predictions: dict[str, object]) -> None:
+    def _update_plot(self, predictions):
         self._clear_plot()
 
         starts = predictions["window_starts"]
-        probabilities = predictions["probabilities"]
-        encoded_labels = np.array([1 if label == "jumping" else 0 for label in predictions["predicted_labels"]])
+        probs = predictions["probabilities"]
+        enc = np.array([1 if lab == "jumping" else 0 for lab in predictions["predicted_labels"]])
 
-        self.axes[0].plot(starts, probabilities, marker="o", color="tab:red", linewidth=1.8)
+        self.axes[0].plot(starts, probs, marker="o", color="tab:red", linewidth=1.8)
         self.axes[0].axhline(0.5, linestyle="--", color="tab:gray", linewidth=1.0)
-        self.axes[1].step(starts, encoded_labels, where="post", color="tab:blue", linewidth=1.8)
+        self.axes[1].step(starts, enc, where="post", color="tab:blue", linewidth=1.8)
         self.canvas.draw()
 
-    def save_output_csv(self) -> None:
+    def save_output_csv(self):
         if self.last_predictions is None:
             messagebox.showerror("No predictions", "Run classification before saving outputs.")
             return
 
-        output_path = filedialog.asksaveasfilename(
+        out = filedialog.asksaveasfilename(
             title="Save prediction CSV",
             defaultextension=".csv",
             filetypes=[("CSV files", "*.csv")],
         )
-        if not output_path:
+        if not out:
             return
 
-        write_predictions_csv(Path(output_path), self.last_predictions)
-        self.status_var.set(f"Saved prediction CSV to: {output_path}")
+        write_predictions_csv(Path(out), self.last_predictions)
+        self.status_var.set("Saved prediction CSV to: " + out)
 
-    def save_plot(self) -> None:
+    def save_plot(self):
         if self.last_predictions is None:
             messagebox.showerror("No predictions", "Run classification before saving the plot.")
             return
 
-        plot_path = filedialog.asksaveasfilename(
+        out = filedialog.asksaveasfilename(
             title="Save prediction plot",
             defaultextension=".png",
             filetypes=[("PNG files", "*.png")],
         )
-        if not plot_path:
+        if not out:
             return
 
-        save_prediction_plot(Path(plot_path), self.last_predictions)
-        self.status_var.set(f"Saved prediction plot to: {plot_path}")
+        save_prediction_plot(Path(out), self.last_predictions)
+        self.status_var.set("Saved prediction plot to: " + out)
 
 
-def run_cli(csv_path: Path) -> None:
-    model_bundle = load_model_bundle()
-    predictions = classify_file(csv_path, model_bundle)
-    output_csv = csv_path.with_name(f"{csv_path.stem}_predictions.csv")
-    output_plot = csv_path.with_name(f"{csv_path.stem}_predictions.png")
+def run_cli(csv_path):
+    bundle = load_model_bundle()
+    predictions = classify_file(csv_path, bundle)
+    out_csv = csv_path.with_name(csv_path.stem + "_predictions.csv")
+    out_png = csv_path.with_name(csv_path.stem + "_predictions.png")
 
-    write_predictions_csv(output_csv, predictions)
-    save_prediction_plot(output_plot, predictions)
+    write_predictions_csv(out_csv, predictions)
+    save_prediction_plot(out_png, predictions)
 
-    print(f"Saved prediction CSV to: {output_csv}")
-    print(f"Saved prediction plot to: {output_plot}")
-    print(f"Generated {len(predictions['predicted_labels'])} predictions.")
+    print("Saved prediction CSV to:", out_csv)
+    print("Saved prediction plot to:", out_png)
+    print("Generated", len(predictions["predicted_labels"]), "predictions.")
 
 
-def main() -> None:
+def main():
     if len(sys.argv) > 1:
         run_cli(Path(sys.argv[1]))
         return
 
     root = tk.Tk()
-    app = ActivityClassifierApp(root)
+    ActivityClassifierApp(root)
     root.mainloop()
 
 

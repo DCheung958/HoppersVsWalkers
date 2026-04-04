@@ -1,9 +1,10 @@
+# Step 4 — smooth the signals 
+
 from pathlib import Path
 
 import h5py
 import matplotlib.pyplot as plt
 import numpy as np
-
 
 BASE_DIR = Path(__file__).resolve().parent
 HDF5_PATH = BASE_DIR / "data" / "hoppers_vs_walkers.h5"
@@ -19,21 +20,27 @@ AXIS_COLORS = {
 }
 
 
-def ensure_output_dir() -> None:
+def ensure_output_dir():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def save_figure(fig: plt.Figure, filename: str) -> None:
+def save_figure(fig, filename):
     fig.tight_layout()
     fig.savefig(OUTPUT_DIR / filename, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
 
-def decode(values: np.ndarray) -> list[str]:
-    return [value.decode() if isinstance(value, bytes) else str(value) for value in values]
+def decode(values):
+    res = []
+    for value in values:
+        if isinstance(value, bytes):
+            res.append(value.decode())
+        else:
+            res.append(str(value))
+    return res
 
 
-def fill_missing_1d(values: np.ndarray) -> tuple[np.ndarray, int]:
+def fill_missing_1d(values):
     filled = values.astype(np.float64, copy=True)
     nan_mask = np.isnan(filled)
     missing_count = int(np.sum(nan_mask))
@@ -41,55 +48,49 @@ def fill_missing_1d(values: np.ndarray) -> tuple[np.ndarray, int]:
     if missing_count == 0:
         return filled, 0
 
-    valid_indices = np.where(~nan_mask)[0]
-    if len(valid_indices) == 0:
+    ok_idx = np.where(~nan_mask)[0]
+    if len(ok_idx) == 0:
         return np.zeros_like(filled), missing_count
 
-    first_valid = valid_indices[0]
-    filled[:first_valid] = filled[first_valid]
+    first = ok_idx[0]
+    filled[:first] = filled[first]
 
-    for index in range(first_valid + 1, len(filled)):
-        if np.isnan(filled[index]):
-            filled[index] = filled[index - 1]
+    i = first + 1
+    while i < len(filled):
+        if np.isnan(filled[i]):
+            filled[i] = filled[i - 1]
+        i += 1
 
     return filled, missing_count
 
 
-def preprocess_signal_matrix(signal_matrix: np.ndarray, window_size: int) -> tuple[np.ndarray, int]:
-    preprocessed = np.zeros_like(signal_matrix, dtype=np.float64)
-    total_missing = 0
-
-    for column_index in range(signal_matrix.shape[1]):
-        filled_column, missing_count = fill_missing_1d(signal_matrix[:, column_index])
-        total_missing += missing_count
-        preprocessed[:, column_index] = moving_average(filled_column, window_size)
-
-    return preprocessed, total_missing
-
-
-def moving_average(values: np.ndarray, window_size: int) -> np.ndarray:
+def moving_average(values, window_size):
     filtered = np.zeros_like(values, dtype=np.float64)
-
-    for index in range(len(values)):
-        start_index = max(0, index - window_size + 1)
-        filtered[index] = np.mean(values[start_index : index + 1])
-
+    for i in range(len(values)):
+        start = max(0, i - window_size + 1)
+        filtered[i] = np.mean(values[start : i + 1])
     return filtered
 
 
-def reset_group(parent: h5py.Group, name: str) -> h5py.Group:
+def preprocess_signal_matrix(signal_matrix, window_size):
+    out = np.zeros_like(signal_matrix, dtype=np.float64)
+    total_missing = 0
+
+    for col in range(signal_matrix.shape[1]):
+        col_filled, nmiss = fill_missing_1d(signal_matrix[:, col])
+        total_missing = total_missing + nmiss
+        out[:, col] = moving_average(col_filled, window_size)
+
+    return out, total_missing
+
+
+def reset_group(parent, name):
     if name in parent:
         del parent[name]
     return parent.create_group(name)
 
 
-def write_preprocessed_raw_group(
-    group: h5py.Group,
-    time_values: np.ndarray,
-    signal_values: np.ndarray,
-    source_group: h5py.Group,
-    missing_count: int,
-) -> None:
+def write_preprocessed_raw_group(group, time_values, signal_values, source_group, missing_count):
     group.create_dataset("time", data=time_values, compression="gzip")
     group.create_dataset("acceleration_xyz", data=signal_values[:, :3], compression="gzip")
     group.create_dataset("absolute_acceleration", data=signal_values[:, 3], compression="gzip")
@@ -100,11 +101,7 @@ def write_preprocessed_raw_group(
     group.attrs["missing_values_filled"] = missing_count
 
 
-def write_preprocessed_split_group(
-    group: h5py.Group,
-    source_group: h5py.Group,
-    filtered_signals: np.ndarray,
-) -> None:
+def write_preprocessed_split_group(group, source_group, filtered_signals):
     group.create_dataset("signals", data=filtered_signals, compression="gzip")
     group.create_dataset("time", data=source_group["time"][:], compression="gzip")
     group.create_dataset("labels", data=source_group["labels"][:], compression="gzip")
@@ -114,7 +111,7 @@ def write_preprocessed_split_group(
     group.attrs["moving_average_window"] = MOVING_AVERAGE_WINDOW
 
 
-def preprocess_hdf5() -> dict[str, int]:
+def preprocess_hdf5():
     summary = {
         "raw_missing_values_filled": 0,
         "train_windows": 0,
@@ -122,56 +119,45 @@ def preprocess_hdf5() -> dict[str, int]:
     }
 
     with h5py.File(HDF5_PATH, "r+") as hdf:
-        preprocessed_root = hdf["preprocessed"]
-        preprocessed_raw_root = reset_group(preprocessed_root, "raw_signals")
-        preprocessed_train = reset_group(preprocessed_root, "train")
-        preprocessed_test = reset_group(preprocessed_root, "test")
+        pre_root = hdf["preprocessed"]
+        raw_sig_root = reset_group(pre_root, "raw_signals")
+        tr_g = reset_group(pre_root, "train")
+        te_g = reset_group(pre_root, "test")
 
-        for participant in sorted(hdf["raw"].keys()):
-            participant_group = preprocessed_raw_root.create_group(participant)
+        for person in sorted(hdf["raw"].keys()):
+            pg = raw_sig_root.create_group(person)
 
-            for activity in sorted(hdf["raw"][participant].keys()):
-                source_group = hdf["raw"][participant][activity]
-                time_values = source_group["time"][:]
-                xyz = source_group["acceleration_xyz"][:]
-                absolute_acceleration = source_group["absolute_acceleration"][:]
-                signal_matrix = np.column_stack([xyz, absolute_acceleration])
+            for act in sorted(hdf["raw"][person].keys()):
+                src = hdf["raw"][person][act]
+                time_values = src["time"][:]
+                xyz = src["acceleration_xyz"][:]
+                abs_acc = src["absolute_acceleration"][:]
+                M = np.column_stack([xyz, abs_acc])
 
-                filtered_matrix, missing_count = preprocess_signal_matrix(
-                    signal_matrix,
-                    MOVING_AVERAGE_WINDOW,
-                )
-                summary["raw_missing_values_filled"] += missing_count
+                filt, nmiss = preprocess_signal_matrix(M, MOVING_AVERAGE_WINDOW)
+                summary["raw_missing_values_filled"] += nmiss
 
-                destination_group = participant_group.create_group(activity)
-                write_preprocessed_raw_group(
-                    destination_group,
-                    time_values,
-                    filtered_matrix,
-                    source_group,
-                    missing_count,
-                )
+                dest = pg.create_group(act)
+                write_preprocessed_raw_group(dest, time_values, filt, src, nmiss)
 
-        for split_name, destination_group in [("train", preprocessed_train), ("test", preprocessed_test)]:
-            source_group = hdf["splits"][split_name]
-            source_signals = source_group["signals"][:]
-            filtered_signals = np.zeros_like(source_signals, dtype=np.float64)
+        for split_name, dest_group in [("train", tr_g), ("test", te_g)]:
+            src = hdf["splits"][split_name]
+            src_sig = src["signals"][:]
+            filt_sig = np.zeros_like(src_sig, dtype=np.float64)
 
-            for window_index in range(source_signals.shape[0]):
-                filtered_signals[window_index], _ = preprocess_signal_matrix(
-                    source_signals[window_index],
-                    MOVING_AVERAGE_WINDOW,
-                )
+            for wi in range(src_sig.shape[0]):
+                tmp, _ = preprocess_signal_matrix(src_sig[wi], MOVING_AVERAGE_WINDOW)
+                filt_sig[wi] = tmp
 
-            write_preprocessed_split_group(destination_group, source_group, filtered_signals)
-            summary[f"{split_name}_windows"] = int(filtered_signals.shape[0])
+            write_preprocessed_split_group(dest_group, src, filt_sig)
+            summary[split_name + "_windows"] = int(filt_sig.shape[0])
 
-        preprocessed_root.attrs["moving_average_window"] = MOVING_AVERAGE_WINDOW
+        pre_root.attrs["moving_average_window"] = MOVING_AVERAGE_WINDOW
 
     return summary
 
 
-def plot_raw_vs_preprocessed_examples() -> None:
+def plot_raw_vs_preprocessed_examples():
     examples = [("Darcy", "walking"), ("Darcy", "jumping")]
 
     with h5py.File(HDF5_PATH, "r") as hdf:
@@ -179,20 +165,20 @@ def plot_raw_vs_preprocessed_examples() -> None:
         if len(examples) == 1:
             axes = [axes]
 
-        for ax, (participant, activity) in zip(axes, examples, strict=False):
-            raw_group = hdf["raw"][participant][activity]
-            processed_group = hdf["preprocessed"]["raw_signals"][participant][activity]
+        for ax, (person, act) in zip(axes, examples):
+            raw_g = hdf["raw"][person][act]
+            proc_g = hdf["preprocessed"]["raw_signals"][person][act]
 
-            time_values = raw_group["time"][:]
-            raw_abs = raw_group["absolute_acceleration"][:]
-            processed_abs = processed_group["absolute_acceleration"][:]
+            t = raw_g["time"][:]
+            raw_abs = raw_g["absolute_acceleration"][:]
+            proc_abs = proc_g["absolute_acceleration"][:]
 
-            end_time = time_values[0] + RAW_SAMPLE_DURATION_SECONDS
-            mask = time_values <= end_time
+            end_t = t[0] + RAW_SAMPLE_DURATION_SECONDS
+            mask = t <= end_t
 
-            ax.plot(time_values[mask], raw_abs[mask], color="tab:gray", linewidth=1.0, label="raw")
-            ax.plot(time_values[mask], processed_abs[mask], color="tab:red", linewidth=1.5, label="preprocessed")
-            ax.set_title(f"Absolute acceleration before and after preprocessing: {participant} - {activity}")
+            ax.plot(t[mask], raw_abs[mask], color="tab:gray", linewidth=1.0, label="raw")
+            ax.plot(t[mask], proc_abs[mask], color="tab:red", linewidth=1.5, label="preprocessed")
+            ax.set_title("Absolute acceleration before/after preprocessing: " + person + " - " + act)
             ax.set_xlabel("Time (s)")
             ax.set_ylabel("Acceleration (m/s^2)")
             ax.grid(True, alpha=0.3)
@@ -201,75 +187,58 @@ def plot_raw_vs_preprocessed_examples() -> None:
         save_figure(fig, "raw_vs_preprocessed_absolute.png")
 
 
-def plot_axis_comparison() -> None:
-    participant = "Darcy"
-    activity = "walking"
+def plot_axis_comparison():
+    person = "Darcy"
+    act = "walking"
 
     with h5py.File(HDF5_PATH, "r") as hdf:
-        raw_group = hdf["raw"][participant][activity]
-        processed_group = hdf["preprocessed"]["raw_signals"][participant][activity]
+        raw_g = hdf["raw"][person][act]
+        proc_g = hdf["preprocessed"]["raw_signals"][person][act]
 
-        time_values = raw_group["time"][:]
-        raw_xyz = raw_group["acceleration_xyz"][:]
-        processed_xyz = processed_group["acceleration_xyz"][:]
+        t = raw_g["time"][:]
+        raw_xyz = raw_g["acceleration_xyz"][:]
+        proc_xyz = proc_g["acceleration_xyz"][:]
 
-        end_time = time_values[0] + RAW_SAMPLE_DURATION_SECONDS
-        mask = time_values <= end_time
+        end_t = t[0] + RAW_SAMPLE_DURATION_SECONDS
+        mask = t <= end_t
 
         fig, axes = plt.subplots(3, 1, figsize=(12, 8), sharex=True)
-        axis_names = ["x", "y", "z"]
+        names = ["x", "y", "z"]
 
-        for axis_index, axis_name in enumerate(axis_names):
-            axes[axis_index].plot(
-                time_values[mask],
-                raw_xyz[mask, axis_index],
-                color="tab:gray",
-                linewidth=1.0,
-                label="raw",
-            )
-            axes[axis_index].plot(
-                time_values[mask],
-                processed_xyz[mask, axis_index],
-                color=AXIS_COLORS[axis_name],
+        for j in range(3):
+            axes[j].plot(t[mask], raw_xyz[mask, j], color="tab:gray", linewidth=1.0, label="raw")
+            axes[j].plot(
+                t[mask],
+                proc_xyz[mask, j],
+                color=AXIS_COLORS[names[j]],
                 linewidth=1.5,
                 label="preprocessed",
             )
-            axes[axis_index].set_ylabel(f"{axis_name}-axis")
-            axes[axis_index].grid(True, alpha=0.3)
-            axes[axis_index].legend(loc="upper right")
+            axes[j].set_ylabel(names[j] + "-axis")
+            axes[j].grid(True, alpha=0.3)
+            axes[j].legend(loc="upper right")
 
-        axes[0].set_title(f"Axis-wise preprocessing comparison: {participant} - {activity}")
+        axes[0].set_title("Axis-wise preprocessing comparison: " + person + " - " + act)
         axes[-1].set_xlabel("Time (s)")
         save_figure(fig, "axis_preprocessing_comparison.png")
 
 
-def plot_preprocessed_window_examples() -> None:
+def plot_preprocessed_window_examples():
     with h5py.File(HDF5_PATH, "r") as hdf:
         raw_signals = hdf["splits"]["train"]["signals"][:]
-        processed_signals = hdf["preprocessed"]["train"]["signals"][:]
-        time_values = hdf["splits"]["train"]["time"][:]
+        proc_signals = hdf["preprocessed"]["train"]["signals"][:]
+        tvals = hdf["splits"]["train"]["time"][:]
         labels = decode(hdf["splits"]["train"]["labels"][:])
 
-        walking_index = labels.index("walking")
-        jumping_index = labels.index("jumping")
+        iw = labels.index("walking")
+        ij = labels.index("jumping")
 
         fig, axes = plt.subplots(2, 1, figsize=(12, 7), sharex=True)
 
-        for ax, index, label in zip(
-            axes,
-            [walking_index, jumping_index],
-            ["walking", "jumping"],
-            strict=False,
-        ):
-            ax.plot(time_values[index], raw_signals[index, :, 3], color="tab:gray", linewidth=1.0, label="raw")
-            ax.plot(
-                time_values[index],
-                processed_signals[index, :, 3],
-                color="tab:red",
-                linewidth=1.5,
-                label="preprocessed",
-            )
-            ax.set_title(f"5-second training window before and after preprocessing: {label}")
+        for ax, idx, lab in zip(axes, [iw, ij], ["walking", "jumping"]):
+            ax.plot(tvals[idx], raw_signals[idx, :, 3], color="tab:gray", linewidth=1.0, label="raw")
+            ax.plot(tvals[idx], proc_signals[idx, :, 3], color="tab:red", linewidth=1.5, label="preprocessed")
+            ax.set_title("5s training window before/after preprocessing: " + lab)
             ax.set_ylabel("Absolute acceleration")
             ax.grid(True, alpha=0.3)
             ax.legend(loc="upper right")
@@ -278,18 +247,18 @@ def plot_preprocessed_window_examples() -> None:
         save_figure(fig, "window_preprocessing_comparison.png")
 
 
-def main() -> None:
+def main():
     ensure_output_dir()
     summary = preprocess_hdf5()
     plot_raw_vs_preprocessed_examples()
     plot_axis_comparison()
     plot_preprocessed_window_examples()
 
-    print(f"Updated preprocessed data in: {HDF5_PATH}")
-    print(f"Saved step 4 figures to: {OUTPUT_DIR}")
-    print(f"Missing values filled: {summary['raw_missing_values_filled']}")
-    print(f"Preprocessed training windows: {summary['train_windows']}")
-    print(f"Preprocessed testing windows: {summary['test_windows']}")
+    print("Updated preprocessed data in:", HDF5_PATH)
+    print("Saved step 4 figures to:", OUTPUT_DIR)
+    print("Missing values filled:", summary["raw_missing_values_filled"])
+    print("Preprocessed training windows:", summary["train_windows"])
+    print("Preprocessed testing windows:", summary["test_windows"])
 
 
 if __name__ == "__main__":
