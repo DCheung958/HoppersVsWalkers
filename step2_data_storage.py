@@ -1,4 +1,4 @@
-# Step 2 — put everyone's CSVs into one HDF5 file for the rest of the project
+# Step 2 — data storage put everyone's CSVs into one HDF5 file for the rest of the project
 
 from pathlib import Path
 

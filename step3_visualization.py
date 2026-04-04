@@ -1,4 +1,4 @@
-# Step 3 — plots for the report 
+# Step 3 — visualization plots for the report 
 
 from pathlib import Path
 

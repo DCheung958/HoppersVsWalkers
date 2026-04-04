@@ -1,4 +1,4 @@
-# Step 4 — smooth the signals 
+# Step 4 — processing to smooth the signals 
 
 from pathlib import Path
 

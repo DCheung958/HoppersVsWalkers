@@ -1,4 +1,4 @@
-# Bonus — realtime-ish classifier hooked up to Phyphox (or a CSV replay)
+# Bonus — realtime classifier hooked up to Phyphox (or a CSV replay)
 
 from collections import deque
 from pathlib import Path

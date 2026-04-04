@@ -1,4 +1,4 @@
-# Step 6 — train logistic regression and dump metrics / plots
+# Step 6 — train classifier logistic regression
 
 from pathlib import Path
 import json

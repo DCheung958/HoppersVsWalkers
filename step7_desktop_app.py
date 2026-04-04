@@ -1,4 +1,4 @@
-# Step 7 — little GUI to run the model on a new CSV (course demo)
+# Step 7 — desktop app
 
 from pathlib import Path
 import csv
